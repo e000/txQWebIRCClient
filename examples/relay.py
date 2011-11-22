@@ -1,8 +1,11 @@
 from twisted.internet import reactor, defer, protocol
 from twisted.protocols import basic
 import sys, os
-sys.path.append(os.path.join(os.getcwd(),'..'))
-from src.webirc import WebIRCConnector, WebIRCLineReceiver
+try:
+    sys.path.append(os.path.join(os.getcwd(),'..'))
+    from src.webirc import WebIRCConnector, WebIRCLineReceiver
+except ImportError:
+    from txQWebIRCClient import WebIRCConnector, WebIRCLineReceiver
 
 def connectToWebIRC(relay, host, nickname):
     f = RelayIRCFactory(relay)
@@ -42,8 +45,9 @@ class RelayIRCProtocol(WebIRCLineReceiver):
     def writeToRelay(self, line):
         self.factory.relay.sendLine(utf8(line))
     lineReceived = writeToRelay
-        
-    writeToServer = sendLine
+    
+    def writeToServer(self, line):
+        return self.transport.write(line)
 
 def getMessage(line):
     if ' :' in line:
@@ -73,9 +77,7 @@ class IRCRelay(basic.LineReceiver):
         
         else:
             try:
-                print line
                 params = line.split()
-                print params
                 if params[0] == "PRIVMSG" and params[1].lower() == '*relay*':
                     return self.handleCommand(line)
                     
@@ -191,7 +193,7 @@ def dateDiff(secs, n = True):
             
     return ' '.join(h)
     
-if __name__ == '__main__':
+def run():
     import optparse
     parser = optparse.OptionParser(usage = 'usage: %prog [options] (webirc server)')
     parser.add_option('-d', '--debug', action = "store_true", dest = "debug", default = False, help = "debug [default: %default]")
@@ -208,7 +210,7 @@ if __name__ == '__main__':
             twisted.python.log.startLogging(sys.stdout)
         f = protocol.ServerFactory()
         f.protocol = IRCRelay
-        f.host = args[0]
+        f.host = args[0].rstrip('/') + '/'
         reactor.listenTCP(
             options.port, f, interface = options.interface
         )
@@ -216,5 +218,6 @@ if __name__ == '__main__':
             f.host, options.interface, options.port
         )
         reactor.run()
-      
     
+if __name__ == '__main__':
+    run()

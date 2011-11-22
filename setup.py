@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name = 'txQWebIRCClient',
-    version = '0.1-dev',
+    version = '0.2-dev',
     license='MIT',
     author='Edgeworth E. Euler',
     author_email = 'e@encyclopediadramatica.ch',
@@ -12,10 +12,15 @@ setup(
     ],
     platforms = 'any',
     packages = [
-        'txQWebIRCClient'
+        'txQWebIRCClient', 'txQWebIRCClient.examples'
     ],
     package_dir = {
-        'txQWebIRCClient': 'src'
-    }
+        'txQWebIRCClient': 'src',
+        'txQWebIRCClient.examples': 'examples'
+    },
+    entry_points = """
+    [console_scripts]
+    webirc-relay=txQWebIRCClient.examples.relay:run
+    """
 
 )

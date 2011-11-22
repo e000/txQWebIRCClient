@@ -173,10 +173,8 @@ class WebIRCTransport(object):
         except: # anything else, something bad happened, but we can recover if we wait a bit and try and poll
             self.failedPoll += 1
             self.failedRequests += 1
-            print "Could not read a proper response from the server"
-            f = failure.Failure()
-            if options.debug:
-                f.printTraceback()
+            log.msg("could not read response from server")
+            log.err()
             self.delayed = reactor.callLater(1, self._poll) # wait 1 second before polling again.
             
         if self.failedRequests >= 10 and not self.cancelled: # too many consecutive failed requests, server is dead.
