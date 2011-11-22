@@ -133,23 +133,24 @@ class WebIRCTransport(object):
             response = yield self._getPage('e/s', dict(s=self.sessionId))
             if not self.sessionId or self.cancelled: # connection was cancelled, we no longer care.
                 raise CancelledException()
+            if not response:
+                raise ValueError("Server sent empty response.")
+                
             data = json.loads(response)
             self._dispatchEvents(data)
             self.failedRequests = 0
+            
         except ValueError:
             self.failedRequests += 1
             print "Could not decode JSON Response!"
             self.delayed = reactor.callLater(1, self._poll)
-            defer.returnValue(None)
             
         except WebIRCException:
             print "Got WebIRCException, closing connection!"
             self._loseConnection(failure.Failure())
-            defer.returnValue(None)
         
         except CancelledException:
             print "request cancelled"
-
         
         except:
             self.failedRequests += 1
@@ -213,8 +214,7 @@ class WebIRCTransport(object):
     def _dispatchEvents(self, data):
         for e in data:
             if not e:
-                print data
-                raise WebIRCException("Connection lost!")
+                raise WebIRCException(data[1])
             try:
                 line = self.dispatcher.eventReceived(e)
                 if line:
@@ -228,6 +228,7 @@ class WebIRCTransport(object):
 class WebIRCDispatcher():
     def eventReceived(self, e):
         opcode = e[0]
+        print opcode
         if opcode == 'c':
             command, user, message = e[1:]
             messageLen = len(message) # how many elements in msg
