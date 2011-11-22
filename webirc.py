@@ -359,7 +359,7 @@ class IRCRelay(basic.LineReceiver):
             )
         ))
             
-    def connectionLost(self):
+    def connectionLost(self, reason):
         if self._irc:
             self._irc.loseConnection()
         
