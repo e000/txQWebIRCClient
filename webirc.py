@@ -4,6 +4,7 @@ from twisted.python import failure
 from twisted.web.client import getPage
 from zope.interface import implements
 import urllib, json
+from time import time
 
 def connectToWebIRC(relay, host, nickname):
     f = WebIRCFactory(relay)
@@ -66,6 +67,9 @@ class WebIRCTransport(object):
         self.dispatcher = WebIRCDispatcher(self)
         self._connect()
         
+        self.failedPoll = 0
+        self.failedSend = 0
+        
     def _getPage(self, url, postData = None, *a, **kw):
         if self.cancelled:
             return defer.fail(
@@ -121,6 +125,7 @@ class WebIRCTransport(object):
             
         else:
             self.connected = 1
+            self.connectTime = time()
             self.sessionId = sessionId
             self.protocol = self.connector.buildProtocol(self.host)
             self.protocol.makeConnection(self)
@@ -150,9 +155,13 @@ class WebIRCTransport(object):
         except CancelledException:
             print "request cancelled"
             
-        except (ValueError, Exception):
+        except (ValueError, Exception), e:
+            self.failedPoll += 1
             self.failedRequests += 1
             print "Could not read a proper response from the server"
+            f = failure.Failure()
+            if options.debug:
+                f.printTraceback()
             self.delayed = reactor.callLater(1, self._poll)
             
         if self.failedRequests >= 10 and not self.cancelled:
@@ -184,6 +193,7 @@ class WebIRCTransport(object):
     def _writeFailed(self, reason, data, maxRetry):
         if self.cancelled:
             return
+        self.failedSend += 1
         if maxRetry == 0:
             reason.printTraceback()
             raise MessageSendError("Could not send message %r after 5 retries" % data)
@@ -214,6 +224,9 @@ class WebIRCTransport(object):
         self.delayed = reactor.callLater(0, self._poll)
         
     def _dispatchEvents(self, data):
+        if isinstance(data, list) and len(data) == 0:
+            return
+            
         if data[0] == False:
             raise WebIRCException(data[1])
         for e in data:
@@ -300,6 +313,7 @@ class IRCRelay(basic.LineReceiver):
         self._queue = []
         self._irc = None
         self._gotNick = False
+        self.tnick = '???'
         
     def lineReceived(self, line):
         if not self._gotNick:
@@ -308,6 +322,7 @@ class IRCRelay(basic.LineReceiver):
                 print "Attempting to establish a connection as %s" % nick
                 d = connectToWebIRC(self, self.factory.host, nick)
                 d.addCallback(self.ircConnectionMade)
+                self.tnick = nick
                 
             self._gotNick = True
             
@@ -316,7 +331,9 @@ class IRCRelay(basic.LineReceiver):
         
         else:
             try:
+                print line
                 params = line.split()
+                print params
                 if params[0] == "PRIVMSG" and params[1].lower() == '*relay*':
                     return self.handleCommand(line)
                     
@@ -326,9 +343,13 @@ class IRCRelay(basic.LineReceiver):
             self._irc.writeToServer(line).addErrback(self.sendFailed)
     
     def sendToUser(self, message):
+        if self._irc:
+            nickname = self._irc.transport.nickname
+        else:
+            nickname = self.tnick
         self.sendLine(utf8(
             ':*relay*!localhost PRIVMSG %s :%s' % (
-                self.transport.nickname, message
+                nickname, message
             )
         ))
     
@@ -340,24 +361,39 @@ class IRCRelay(basic.LineReceiver):
         if message.startswith('!'):
             message = message[1:].strip()
             params = message.split()
-            cmd, params = h[0], h[1:]
+            cmd, params = params[0], params[1:]
             handler = getattr(self, 'COMMAND_%s' % cmd.lower(), None)
             if handler:
-                handler(params)
+                return handler(params)
+
+        commands = ['!' + s[8:] for s in dir(self) if s.startswith('COMMAND_')]
+        self.sendToUser("Usable commands are %s" % ', '.join(commands))
     
     def COMMAND_status(self, params):
-        self.sendToUser(
-            "Currently tunneling qWebIRC to %s nick: %s" % (self.transport.host, self.transport.nickname)
-        )
-            
+        if not self._irc:
+            self.sendToUser("not yet connected")
+        else:
+            self.sendToUser(
+                "Currently tunneling qWebIRC to %s nick: %s" % (self._irc.transport.host, self._irc.transport.nickname)
+            )
+            self.sendToUser(
+                "Requests sent: %i " % self._irc.transport.i
+            )
+            self.sendToUser(
+                "Polls failed: %i " % self._irc.transport.failedPoll
+            )
+            self.sendToUser(
+                "Sends failed: %i " % self._irc.transport.failedSend
+            )
+            self.sendToUser(
+                "Connected for %s" %  dateDiff(time() - self._irc.transport.connectTime)
+            )
         
     
     def sendFailed(self, e):
-        self.sendLine(utf8(
-            ':*relay*!localhost PRIVMSG %s :%s' % (
-                self.transport.nickname, e.value[0]
-            )
-        ))
+        self.sendToUser(
+            e.value[0]
+        )
             
     def connectionLost(self, reason):
         if self._irc:
@@ -385,6 +421,34 @@ class IRCRelay(basic.LineReceiver):
             irc.transport.writeSequence(q)
             self._queue = []
             
+_timeOrder = (
+    ('week', 60*60*24*7),
+    ('day', 60*60*24),
+    ('hour', 60*60),
+    ('minute', 60),
+    ('second', 1)
+)
+
+def dateDiff(secs, n = True):
+    if not isinstance(secs, int):
+        secs = int(secs)
+    
+    secs = abs(secs)
+    if secs == 0:
+        return '0 seconds'
+        
+    h = []
+    a = h.append
+    for name, value in _timeOrder:
+        x = secs/value
+        if x > 0:
+            a('%i %s%s' % (x, name, ('s', '')[x is 1]))
+            secs -= x*value
+    z=len(h)
+    if n is True and z > 1: h.insert(z-1, 'and')
+            
+    return ' '.join(h)
+
 
 if __name__ == '__main__':
     import optparse
