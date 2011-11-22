@@ -28,6 +28,7 @@ class WebIRCFactory(protocol.ClientFactory):
     
     def clientConnectionFailed(self, c, reason):
         self.d.errback(reason)
+        self.relay.ircConnectionFailed(reason)
 
 class WebIRCException(Exception): # a fatal error occurred, kill conns.
     pass
@@ -108,7 +109,6 @@ class WebIRCTransport(object):
             print "request cancelled"
         
         except (WebIRCException, Exception):
-            print "exception?"
             if not self.cancelled:
                 f = failure.Failure()
                 self.connector.connectionFailed(f)
@@ -140,11 +140,6 @@ class WebIRCTransport(object):
             self._dispatchEvents(data)
             self.failedRequests = 0
             
-        except ValueError:
-            self.failedRequests += 1
-            print "Could not decode JSON Response!"
-            self.delayed = reactor.callLater(1, self._poll)
-            
         except WebIRCException:
             print "Got WebIRCException, closing connection!"
             f = failure.Failure()
@@ -153,9 +148,11 @@ class WebIRCTransport(object):
         
         except CancelledException:
             print "request cancelled"
-        
-        except:
+            
+        except (ValueError, EXception):
             self.failedRequests += 1
+            print "Could not read a proper response from the server"
+            self.delayed = reactor.callLater(1, self._poll)
             
         if self.failedRequests >= 10 and not self.cancelled:
             self._loseConnection(failure.Failure(WebIRCException("Too many failed connections")))
@@ -187,7 +184,8 @@ class WebIRCTransport(object):
         if self.cancelled:
             return
         if isRetry:
-            self.protocol.writeFailed(reason, data)
+            print "Could not send message %s" % data
+            reason.printTraceback()
         else:
             reactor.callLater(0.5, self.write, data, 1)
     
@@ -230,7 +228,6 @@ class WebIRCTransport(object):
 class WebIRCDispatcher():
     def eventReceived(self, e):
         opcode = e[0]
-        print opcode
         if opcode == 'c':
             command, user, message = e[1:]
             messageLen = len(message) # how many elements in msg
@@ -241,7 +238,7 @@ class WebIRCDispatcher():
                     line = line[2:]
                 return line
         elif opcode == 'disconnect':
-            raise WebIRCException("server sent disconnect opcode.")
+            raise WebIRCException("qWebIRC closed the connection.")
 
     
     def writeFailed(self, l, r):
@@ -295,7 +292,6 @@ class IRCRelay(basic.LineReceiver):
                 print "Attempting to establish a connection as %s" % nick
                 d = connectToWebIRC(self, self.factory.host, nick)
                 d.addCallback(self.ircConnectionMade)
-                d.addErrback(self.ircConnectionFailed)
                 
             self._gotNick = True
             
