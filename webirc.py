@@ -149,7 +149,7 @@ class WebIRCTransport(object):
         except CancelledException:
             print "request cancelled"
             
-        except (ValueError, EXception):
+        except (ValueError, Exception):
             self.failedRequests += 1
             print "Could not read a proper response from the server"
             self.delayed = reactor.callLater(1, self._poll)
