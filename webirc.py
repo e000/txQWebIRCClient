@@ -172,7 +172,6 @@ class WebIRCTransport(object):
                     self.delayed = None
                 self.sessionId = None
                 self.connector.connectionLost(reason)
-            self.protocol.factory.relay.ircConnectionLost(reason)
             
     def loseConnection(self, reason = None):
         if self.sessionId:
