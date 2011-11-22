@@ -288,7 +288,7 @@ class WebIRCProtocol(protocol.BaseProtocol):
     lineReceived = writeToRelay
         
     def writeToServer(self, line):
-        self.transport.write(line)
+        return self.transport.write(line)
 
 def getMessage(line):
     if ' :' in line:
