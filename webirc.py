@@ -1,46 +1,36 @@
 from twisted.internet import reactor, base, interfaces, defer, protocol
 from twisted.protocols import basic
-from twisted.python import failure
+from twisted.python import failure, log
 from twisted.web.client import getPage
 from zope.interface import implements
 import urllib, json
 from time import time
 
-def connectToWebIRC(relay, host, nickname):
-    f = WebIRCFactory(relay)
+def connectToWebIRC(host, nickname, factory):
     c = WebIRCConnector(
-        host, nickname, f, None, reactor
+        host, nickname, factory, None, reactor
     )
     c.connect()
-    return f.d
+    return c
 
-class WebIRCFactory(protocol.ClientFactory):
-    def __init__(self, relay):
-        self.relay = relay
-        self.d = defer.Deferred()
-    
-    def buildProtocol(self, addr):
-        p = WebIRCProtocol()
-        p.factory = self
-        return p
-    
-    def clientConnectionLost(self, c, reason):
-        self.relay.ircConnectionLost(reason)
-    
-    def clientConnectionFailed(self, c, reason):
-        self.d.errback(reason)
-        self.relay.ircConnectionFailed(reason)
-
-class WebIRCException(Exception): # a fatal error occurred, kill conns.
+class WebIRCException(Exception):
+    """
+        Something bad happened, and we can no longer use the transport to communicate with the IRC server.
+    """
     pass
 
-class CancelledException(Exception): # halt execution, one side lost a transport.
+class CancelledException(Exception):
+    """
+        I get raised if a response is received after the connection is cancelled, or we try
+        to send a request when the connection is cancelled.
+    """
     pass
 
-class MessageSendError(Exception):
-    pass
 
 class WebIRCConnector(base.BaseConnector):
+    """
+        Connector that is used to connect to a qWebIRC server
+    """
     def __init__(self, host, nickname, factory, timeout, reactor):
         self.host = host
         self.nickname = nickname
@@ -50,6 +40,9 @@ class WebIRCConnector(base.BaseConnector):
         return WebIRCTransport(self, self.host, self.nickname)
         
 class WebIRCTransport(object):
+    """
+        Transport that transparently handles all IO between us and the qWebIRC server
+    """
     implements(interfaces.IPushProducer, interfaces.ITransport)
     
     def __init__(self, connector, host, nickname):
@@ -71,10 +64,17 @@ class WebIRCTransport(object):
         self.failedSend = 0
         
     def _getPage(self, url, postData = None, *a, **kw):
+        """
+            A wrapper around getPage to properly fetch data from the server,
+            returns an defer.Deferred instance that will fire when the request
+            is done with the proper result, or error.
+            
+            Will errbaxck with a CancelledException if called on a cancelled connection.
+        """
         if self.cancelled:
             return defer.fail(
                 failure.Failure(
-                    WebIRCException("Connection cancelled.")
+                    CancelledException("Connection cancelled.")
                 )
             )
         
@@ -85,6 +85,7 @@ class WebIRCTransport(object):
             kw['headers'].update({
                 'Content-Type': 'application/x-www-form-urlencoded'
             })
+        
         else:
             method = "GET"
             
@@ -99,30 +100,34 @@ class WebIRCTransport(object):
         
     def failIfNotConnected(self, r):
         if not self.connected:
-            print "finc"
-            self._loseConnection()
+            self._connectionLost()
         
     @defer.inlineCallbacks
     def _connect(self):
+        """
+            Attempts to request a sessionid from the qwebirc server, and use that
+            to poll.
+        """
         try:
             response = yield self._getPage('e/n', dict(nick = self.nickname))
-            if self.cancelled:
-                raise CancelledException
+            if self.cancelled: # we cancelled the connection, so we don't care anymore.
+                raise CancelledException()
+                
+            if not response:
+                raise WebIRCException("Server sent back empty response.")
+                
             success, sessionId = json.loads(response)
-            if not success:
+            if not success: # something wrong happened
                 raise WebIRCException(sessionId)
             
         except CancelledException:
-            print "request cancelled"
+            pass # we don't care if this exception is raised.
         
-        except (WebIRCException, Exception):
+        except (WebIRCException, Exception): # any other exception and something wrong happened.
             if not self.cancelled:
                 f = failure.Failure()
                 self.connector.connectionFailed(f)
-        except:
-            f = failure.Failure()
-            f.printTraceback()
-            
+
         else:
             self.connected = 1
             self.connectTime = time()
@@ -133,43 +138,53 @@ class WebIRCTransport(object):
             
     @defer.inlineCallbacks
     def _poll(self):
+        """
+            Runs a long poll iteration to the server, and dispatches based on responses
+        """
+        
         self.delayed = None
         if self.inPoll or self.paused:
             defer.returnValue(None)
         
         try:
             response = yield self._getPage('e/s', dict(s=self.sessionId))
-            if not self.sessionId or self.cancelled: # connection was cancelled, we no longer care.
+            
+            if self.cancelled: # connection was cancelled, we no longer care.
                 raise CancelledException()
+                
             if not response:
                 raise ValueError("Server sent empty response.")
+                
             data = json.loads(response)
             self._dispatchEvents(data)
-            self.failedRequests = 0
+            self.failedRequests = 0 # reset the failed requests counter as this was a successful iteration
             
-        except WebIRCException:
-            print "Got WebIRCException, closing connection!"
-            f = failure.Failure()
-            self._loseConnection(f)
+        except WebIRCException: 
+            log.msg("Got WebIRCException, closing connection!")
+            log.err()
+            self._connectionLost(failure.Failure())
         
         except CancelledException:
-            print "request cancelled"
+            pass
             
-        except (ValueError, Exception), e:
+        except: # anything else, something bad happened, but we can recover if we wait a bit and try and poll
             self.failedPoll += 1
             self.failedRequests += 1
             print "Could not read a proper response from the server"
             f = failure.Failure()
             if options.debug:
                 f.printTraceback()
-            self.delayed = reactor.callLater(1, self._poll)
+            self.delayed = reactor.callLater(1, self._poll) # wait 1 second before polling again.
             
-        if self.failedRequests >= 10 and not self.cancelled:
-            self._loseConnection(failure.Failure(WebIRCException("Too many failed connections")))
-        elif not self.cancelled and not self.delayed:
+        if self.failedRequests >= 10 and not self.cancelled: # too many consecutive failed requests, server is dead.
+            self._connectionLost(failure.Failure(WebIRCException("Too many failed connections")))
+        elif not self.cancelled and not self.delayed and not self.paused: 
             self.delayed = reactor.callLater(0.25, self._poll) # a slight delay between polls to allow messages to accum
             
-    def _loseConnection(self, reason = None):
+    def _connectionLost(self, reason = None):
+        """
+            The connection was lost, and it was not requested.
+        """
         if not self.cancelled:
             self.cancelled = True
             self.connected = 0
@@ -181,66 +196,99 @@ class WebIRCTransport(object):
                 self.connector.connectionLost(reason)
             
     def loseConnection(self, reason = None):
+        """
+            Close the connection!
+        """
         if self.sessionId:
             self.write("QUIT :Exiting")
         self.connected = 0
         self.sessionId = None
         self.cancelled = True
-        if self.delayed:
+        if self.delayed: # if we have a poll queued, cancel it.
             self.delayed.cancel()
             self.delayed = None
     
-    def _writeFailed(self, reason, data, maxRetry):
-        if self.cancelled:
-            return
-        self.failedSend += 1
-        if maxRetry == 0:
-            reason.printTraceback()
-            raise MessageSendError("Could not send message %r after 5 retries" % data)
-        else:
-            reactor.callLater(0.5, self.write, data, maxRetry - 1)
-    
-    def write(self, data, maxRetry = 5):
-        d = self._getPage(
+    def _write(self, d, data, maxRetry = 5):
+        self._getPage(
             'e/p',
             dict(s=self.sessionId, c = data)
-        )
+        ) \
+        .addCallback(lambda r: d.callback(r)) \
+        .addErrback(self._writeFailed, d, data, maxRetry)
+    
+    def _writeFailed(self, reason, d, data, maxRetry):
+        if self.cancelled:
+            d.errback(failure.Failure(CancelledException("IRC connection lost while trying to send.")))
+            return
         
-        d.addErrback(self._writeFailed, data, maxRetry)
+        self.failedSend += 1
+        if maxRetry == 0:
+            log.msg("failed to send message %s" % data)
+            log.err(reason)
+            d.errback(reason)
+        else:
+            reactor.callLater(0.25, self._write, d, data, maxRetry - 1)
+    
+    def write(self, data):
+        """
+            Writes data to the IRC server, will attempt to retry a write 5 times
+            before giving up, and raising an error.
+        """
+        d = defer.Deferred()
+        self._write(d, data)
         return d
     
     @defer.inlineCallbacks # make sure the requests are sent in a proper order as best we can.
     def writeSequence(self, iovec):
+        """
+            Tries our best to write data to the IRC server in strict succession, will only
+            call the next write when we are sure data was written successfully.
+        """
         for i in iovec:
             yield self.write(i)
 
     def pauseProducing(self):
+        """
+            Stop polling the server for a bit.
+        """
         self.paused = True
         
     def resumeProducing(self):
+        """
+            Start polling again.
+        """
         self.paused = False
         if self.delayed:
             self.delayed.cancel()
         self.delayed = reactor.callLater(0, self._poll)
         
     def _dispatchEvents(self, data):
+        """
+            Attempt to parse the events and turn them into a line
+        """
         if isinstance(data, list) and len(data) == 0:
-            return
+            return # this means no new events from server.
             
-        if data[0] == False:
-            raise WebIRCException(data[1])
+        if data[0] == False: # this means some kind of error happened!
+            raise WebIRCException(data[1]) # data[1] is usually the error reported by the server.
+            
         for e in data:
             try:
-                line = self.dispatcher.eventReceived(e)
+                line = self.dispatcher.eventReceived(e) # dispatch the event to our dispatcher and have it translate.
                 if line:
                     self.protocol.lineReceived(line)
             except WebIRCException:
-                raise
+                raise # propegate this error back to _poll, so it will know to close the connection.
             except:
-                f = failure.Failure()
-                f.printTraceback()
+                log.msg("dispatcher encountered an error.")
+                log.err()
+
 
 class WebIRCDispatcher():
+    """
+        This attempts to reconstruct events sent by qWebIRC into a proper irc line.
+    """
+    
     def __init__(self, t):
         self.transport = t
         
@@ -257,10 +305,6 @@ class WebIRCDispatcher():
                 return line
         elif opcode == 'disconnect':
             raise WebIRCException("qWebIRC closed the connection.")
-
-    
-    def writeFailed(self, l, r):
-        print "write failed", l, r
         
     def elen_1(self, command, user, message):
         return u':%s %s %s' % (user, command, message[0])
@@ -275,6 +319,7 @@ class WebIRCDispatcher():
         return u':%s %s %s' % (user, command, ' '.join(message))
         
     def e_332(self, command, user, message):
+        """ fix so that topic messages get printed properly. """
         return ':%s 332 %s %s :%s' % (user, message[0], message[1], message[2])
         
     def e_NICK(self, command, user, message):
@@ -286,194 +331,5 @@ class WebIRCDispatcher():
     
     e_333 = eUnknown
 
-def utf8(value):
-    if isinstance(value, unicode):
-        return value.encode("utf-8")
-    assert isinstance(value, str)
-    return value
-
-class WebIRCProtocol(protocol.BaseProtocol):
-    def connectionMade(self):
-        self.factory.d.callback(self)
-        
-    def writeToRelay(self, line):
-        self.factory.relay.sendLine(utf8(line))
-    lineReceived = writeToRelay
-        
-    def writeToServer(self, line):
-        return self.transport.write(line)
-
-def getMessage(line):
-    if ' :' in line:
-        return line.split(' :', 1)[1]
-    return ''
-
-class IRCRelay(basic.LineReceiver):
-    def __init__(self):
-        self._queue = []
-        self._irc = None
-        self._gotNick = False
-        self.tnick = '???'
-        
-    def lineReceived(self, line):
-        if not self._gotNick:
-            cmd, nick = line.split(' ', 1)
-            if cmd == 'NICK':
-                print "Attempting to establish a connection as %s" % nick
-                d = connectToWebIRC(self, self.factory.host, nick)
-                d.addCallback(self.ircConnectionMade)
-                self.tnick = nick
-                
-            self._gotNick = True
-            
-        elif not self._irc:
-            self._queue.append(line)
-        
-        else:
-            try:
-                print line
-                params = line.split()
-                print params
-                if params[0] == "PRIVMSG" and params[1].lower() == '*relay*':
-                    return self.handleCommand(line)
-                    
-            except:
-                pass
-            
-            self._irc.writeToServer(line).addErrback(self.sendFailed)
-    
-    def sendToUser(self, message):
-        if self._irc:
-            nickname = self._irc.transport.nickname
-        else:
-            nickname = self.tnick
-        self.sendLine(utf8(
-            ':*relay*!localhost PRIVMSG %s :%s' % (
-                nickname, message
-            )
-        ))
-    
-    def handleCommand(self, line):
-        message = getMessage(line)
-        if not message:
-            return
-        
-        if message.startswith('!'):
-            message = message[1:].strip()
-            params = message.split()
-            cmd, params = params[0], params[1:]
-            handler = getattr(self, 'COMMAND_%s' % cmd.lower(), None)
-            if handler:
-                return handler(params)
-
-        commands = ['!' + s[8:] for s in dir(self) if s.startswith('COMMAND_')]
-        self.sendToUser("Usable commands are %s" % ', '.join(commands))
-    
-    def COMMAND_status(self, params):
-        if not self._irc:
-            self.sendToUser("not yet connected")
-        else:
-            self.sendToUser(
-                "Currently tunneling qWebIRC to %s nick: %s" % (self._irc.transport.host, self._irc.transport.nickname)
-            )
-            self.sendToUser(
-                "Requests sent: %i " % self._irc.transport.i
-            )
-            self.sendToUser(
-                "Polls failed: %i " % self._irc.transport.failedPoll
-            )
-            self.sendToUser(
-                "Sends failed: %i " % self._irc.transport.failedSend
-            )
-            self.sendToUser(
-                "Connected for %s" %  dateDiff(time() - self._irc.transport.connectTime)
-            )
-        
-    
-    def sendFailed(self, e):
-        self.sendToUser(
-            e.value[0]
-        )
-            
-    def connectionLost(self, reason):
-        if self._irc:
-            self._irc.transport.loseConnection()
-        
-    def ircConnectionFailed(self, reason):
-        er = utf8("ERROR :Could not connect to relay server, %s: %s" % (reason.type.__name__, ', '.join(str(v) for v in reason.value)))
-        self.sendLine(er)
-        print er
-        self.transport.loseConnection()
-    
-    def ircConnectionLost(self, reason):
-        er = utf8("ERROR :Connection to relay server lost %s: %s" % (reason.type.__name__, ', '.join(str(v) for v in reason.value)))
-        self.sendLine(er)
-        print er
-        self.transport.loseConnection()
-        
-    def ircConnectionMade(self, irc):
-        self._irc = irc
-        print "Connection to IRC server made successfully, %r" % irc
-        if not self.transport.connected:
-            irc.loseConnection()
-        elif self._queue:
-            q = self._queue[:]
-            irc.transport.writeSequence(q)
-            self._queue = []
-            
-_timeOrder = (
-    ('week', 60*60*24*7),
-    ('day', 60*60*24),
-    ('hour', 60*60),
-    ('minute', 60),
-    ('second', 1)
-)
-
-def dateDiff(secs, n = True):
-    if not isinstance(secs, int):
-        secs = int(secs)
-    
-    secs = abs(secs)
-    if secs == 0:
-        return '0 seconds'
-        
-    h = []
-    a = h.append
-    for name, value in _timeOrder:
-        x = secs/value
-        if x > 0:
-            a('%i %s%s' % (x, name, ('s', '')[x is 1]))
-            secs -= x*value
-    z=len(h)
-    if n is True and z > 1: h.insert(z-1, 'and')
-            
-    return ' '.join(h)
 
 
-if __name__ == '__main__':
-    import optparse
-    parser = optparse.OptionParser(usage = 'usage: %prog [options] (webirc server)')
-    parser.add_option('-d', '--debug', action = "store_true", dest = "debug", default = False, help = "debug [default: %default]")
-    parser.add_option('-i', '--interface', dest = "interface", default = "127.0.0.1", help = "interface to listen on [default: %default]")
-    parser.add_option('-p', '--port', dest = "port", type = "int", default = 6667, help = "port to listen on [default: %default]")
-    
-    options, args = parser.parse_args()
-    if not args:
-        parser.print_usage()
-    else:
-        if options.debug:
-            import sys
-            import twisted.python.log
-            twisted.python.log.startLogging(sys.stdout)
-        f = protocol.ServerFactory()
-        f.protocol = IRCRelay
-        f.host = args[0]
-        reactor.listenTCP(
-            options.port, f, interface = options.interface
-        )
-        print "Listening for connections to relay to %s on %s:%i" % (
-            f.host, options.interface, options.port
-        )
-        reactor.run()
-      
-    
