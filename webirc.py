@@ -361,7 +361,7 @@ class IRCRelay(basic.LineReceiver):
             
     def connectionLost(self, reason):
         if self._irc:
-            self._irc.loseConnection()
+            self._irc.transport.loseConnection()
         
     def ircConnectionFailed(self, reason):
         er = utf8("ERROR :Could not connect to relay server, %s: %s" % (reason.type.__name__, ', '.join(str(v) for v in reason.value)))
