@@ -147,7 +147,9 @@ class WebIRCTransport(object):
             
         except WebIRCException:
             print "Got WebIRCException, closing connection!"
-            self._loseConnection(failure.Failure())
+            f = failure.Failure()
+            f.printTraceback()
+            self._loseConnection(f)
         
         except CancelledException:
             print "request cancelled"
@@ -155,7 +157,7 @@ class WebIRCTransport(object):
         except:
             self.failedRequests += 1
             
-        if self.failedRequests >= 10:
+        if self.failedRequests >= 10 and not self.cancelled:
             self._loseConnection(failure.Failure(WebIRCException("Too many failed connections")))
         elif not self.cancelled and not self.delayed:
             self.delayed = reactor.callLater(0, self._poll)
@@ -212,9 +214,9 @@ class WebIRCTransport(object):
         self.delayed = reactor.callLater(0, self._poll)
         
     def _dispatchEvents(self, data):
+        if data[0] == False:
+            raise WebIRCException(data[1])
         for e in data:
-            if not e:
-                raise WebIRCException(data[1])
             try:
                 line = self.dispatcher.eventReceived(e)
                 if line:
