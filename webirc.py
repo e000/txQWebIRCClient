@@ -213,11 +213,14 @@ class WebIRCTransport(object):
     def _dispatchEvents(self, data):
         for e in data:
             if not e:
+                print data
                 raise WebIRCException("Connection lost!")
             try:
                 line = self.dispatcher.eventReceived(e)
                 if line:
                     self.protocol.lineReceived(line)
+            except WebIRCException:
+                raise
             except:
                 f = failure.Failure()
                 f.printTraceback()
@@ -234,6 +237,8 @@ class WebIRCDispatcher():
                 if not user:
                     line = line[2:]
                 return line
+        elif opcode == 'disconnect':
+            raise WebIRCException("server sent disconnect opcode.")
 
     
     def writeFailed(self, l, r):
@@ -332,6 +337,7 @@ if __name__ == '__main__':
         parser.print_usage()
     else:
         if options.debug:
+            import sys
             import twisted.python.log
             twisted.python.log.startLogging(sys.stdout)
         f = protocol.ServerFactory()
