@@ -1,4 +1,4 @@
-from twisted.internet import reactor, base, interfaces, defer, protocol
+from twisted.internet import reactor, base, interfaces, defer, protocol, error
 from twisted.protocols import basic
 from twisted.python import failure, log
 from twisted.web.client import getPage
@@ -164,6 +164,9 @@ class WebIRCTransport(object):
             log.err()
             self._connectionLost(failure.Failure())
         
+        except error.ConnectionDone, e:
+            self._connectionLost()
+        
         except CancelledException:
             pass
             
@@ -181,7 +184,7 @@ class WebIRCTransport(object):
         elif not self.cancelled and not self.delayed and not self.paused: 
             self.delayed = reactor.callLater(0.25, self._poll) # a slight delay between polls to allow messages to accum
             
-    def _connectionLost(self, reason = None):
+    def _connectionLost(self, reason = protocol.connectionDone):
         """
             The connection was lost, and it was not requested.
         """
@@ -193,6 +196,7 @@ class WebIRCTransport(object):
                     self.delayed.cancel()
                     self.delayed = None
                 self.sessionId = None
+                self.protocol.connectionLost(reason)
                 self.connector.connectionLost(reason)
             
     def loseConnection(self, reason = None):
@@ -304,7 +308,7 @@ class WebIRCDispatcher():
                     line = line[2:]
                 return line
         elif opcode == 'disconnect':
-            raise WebIRCException("qWebIRC closed the connection.")
+            raise error.ConnectionDone()
         
     def elen_1(self, command, user, message):
         return u':%s %s %s' % (user, command, message[0])
@@ -331,5 +335,23 @@ class WebIRCDispatcher():
     
     e_333 = eUnknown
 
+class WebIRCLineReceiver(protocol.BaseProtocol):
+    def lineReceived(self, line):
+        """
+            Override this for when each line is received from qwebirc
+        """
+        raise NotImplementedError
+    
+    def sendLine(self, line):
+        """
+            Sends a line to QWebIRC
+            @param line: the line to send, not including the delimeter
+        """
+        self.transport.write(line)
+    
+    def connectionLost(self, reason = None):
+        """
+            Called when connection is shut down.
+        """
 
 

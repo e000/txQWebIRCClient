@@ -2,7 +2,7 @@ from twisted.internet import reactor, defer, protocol
 from twisted.protocols import basic
 import sys, os
 sys.path.append(os.path.join(os.getcwd(),'..'))
-from src.webirc import WebIRCConnector
+from src.webirc import WebIRCConnector, WebIRCLineReceiver
 
 def connectToWebIRC(relay, host, nickname):
     f = RelayIRCFactory(relay)
@@ -35,7 +35,7 @@ def utf8(value):
     assert isinstance(value, str)
     return value
 
-class RelayIRCProtocol(protocol.BaseProtocol):
+class RelayIRCProtocol(WebIRCLineReceiver):
     def connectionMade(self):
         self.factory.d.callback(self)
         
@@ -43,8 +43,7 @@ class RelayIRCProtocol(protocol.BaseProtocol):
         self.factory.relay.sendLine(utf8(line))
     lineReceived = writeToRelay
         
-    def writeToServer(self, line):
-        return self.transport.write(line)
+    writeToServer = sendLine
 
 def getMessage(line):
     if ' :' in line:
