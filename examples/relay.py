@@ -1,6 +1,8 @@
 from twisted.internet import reactor, defer, protocol
 from twisted.protocols import basic
 import sys, os
+from time import time
+
 try:
     sys.path.append(os.path.join(os.getcwd(),'..'))
     from src.webirc import WebIRCConnector, WebIRCLineReceiver
