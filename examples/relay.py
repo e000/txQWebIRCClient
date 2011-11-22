@@ -1,7 +1,8 @@
 from twisted.internet import reactor, defer, protocol
 from twisted.protocols import basic
-
-from webirc import WebIRCConnector
+import sys, os
+sys.path.append(os.path.join(os.getcwd(),'..'))
+from src.webirc import WebIRCConnector
 
 def connectToWebIRC(relay, host, nickname):
     f = RelayIRCFactory(relay)
