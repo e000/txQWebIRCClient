@@ -163,15 +163,16 @@ class WebIRCTransport(object):
             self.delayed = reactor.callLater(0, self._poll)
             
     def _loseConnection(self, reason = None):
-        self.cancelled = True
-        self.connected = 0
-        if self.sessionId:
-            if self.delayed:
-                self.delayed.cancel()
-                self.delayed = None
-            self.sessionId = None
-            self.connector.connectionLost(reason)
-        self.protocol.factory.relay.ircConnectionLost(reason)
+        if not self.cancelled:
+            self.cancelled = True
+            self.connected = 0
+            if self.sessionId:
+                if self.delayed:
+                    self.delayed.cancel()
+                    self.delayed = None
+                self.sessionId = None
+                self.connector.connectionLost(reason)
+            self.protocol.factory.relay.ircConnectionLost(reason)
             
     def loseConnection(self, reason = None):
         if self.sessionId:
